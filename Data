@@ -1,0 +1,202 @@
+# CS438 Project
+## Load Data
+
+import pandas as pd
+import numpy as np
+import io
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+from sklearn.model_selection import learning_curve
+from sklearn.metrics import roc_curve, auc, precision_score, recall_score
+from matplotlib_venn import venn2
+import joblib
+
+df = pd.read_csv('https://raw.githubusercontent.com/StevenJ002/MarvalRivalStats/refs/heads/main/MarvalRivalplayers_500.csv')
+df
+
+## Data Peperation
+### Data Seperation
+if 'PlayerID' in df.columns:
+    df = df.drop('PlayerID', axis=1)
+df
+
+y = df['PrimaryPlaystyle']
+y
+
+x = df.drop('PrimaryPlaystyle', axis=1)
+x
+
+## Encode target labels to integers
+le = LabelEncoder()
+y_enc = le.fit_transform(y)
+print("Mapping:", dict(zip(le.classes_, le.transform(le.classes_))))
+
+
+## Data Splitting (60% train, 20% val, 20% test)
+x_train_val, x_test, y_train_val, y_test = train_test_split(
+    x, y_enc, test_size=0.20, random_state=42, stratify=y_enc
+)
+x_train, x_val, y_train, y_val = train_test_split(
+    x_train_val, y_train_val, test_size=0.25,
+    random_state=42, stratify=y_train_val
+)
+print("Shapes → Train:", x_train.shape, "Validation:", x_val.shape, "Test:", x_test.shape)
+
+## Model Building
+
+### Scale the features
+scaler = StandardScaler().fit(x_train)
+x_train_scaled = scaler.transform(x_train)
+x_val_scaled   = scaler.transform(x_val)
+x_test_scaled  = scaler.transform(x_test)
+
+### Hyperparameter tuning on Val (Log Reg)
+best_val_acc = 0
+best_params = {}
+for C in [0.01, 0.1, 1, 10, 100]:
+    for max_iter in [500, 1000]:
+        lr = LogisticRegression(C=C, solver='lbfgs', max_iter=max_iter)
+        lr.fit(x_train_scaled, y_train)
+        val_acc = accuracy_score(y_val, lr.predict(x_val_scaled))
+        print(f"C={C}, max_iter={max_iter} → Validation Accuracy={val_acc:.3f}")
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_params = {'C': C, 'max_iter': max_iter}
+
+print("\nBest hyperparameters:", best_params, "Validation Accuracy:", best_val_acc)
+
+### Combine train and val
+scaler_final = StandardScaler().fit(x_train_val)
+x_train_val_scaled = scaler_final.transform(x_train_val)
+x_test_scaled_final = scaler_final.transform(x_test)
+
+## Logistic Regression
+final_model = LogisticRegression(
+    C=best_params['C'],
+    max_iter=best_params['max_iter'],
+    solver='lbfgs',
+    class_weight='balanced',
+    multi_class='multinomial'
+)
+final_model.fit(x_train_val_scaled, y_train_val)
+
+### Result
+y_test_pred = final_model.predict(x_test_scaled_final)
+print("\nTest Accuracy:", accuracy_score(y_test, y_test_pred))
+print("\nClassification Report:")
+print(classification_report(y_test, y_test_pred, target_names=le.classes_))
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_test_pred))
+
+## RandomForest
+### Hyperparameter tuning on Val (RandF)
+best_val_acc = 0
+best_params = {}
+for n in [100, 200, 300]:
+    for depth in [None, 10, 20]:
+        rf = RandomForestClassifier(
+            n_estimators=n,
+            max_depth=depth,
+            class_weight='balanced',
+            random_state=42,
+            n_jobs=-1
+        )
+        rf.fit(x_train, y_train)
+        val_pred = rf.predict(x_val)
+        val_acc = accuracy_score(y_val, val_pred)
+        print(f"n_estimators={n}, max_depth={depth} → Val Acc={val_acc:.3f}")
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_params = {'n_estimators': n, 'max_depth': depth}
+
+print("\nBest parameters:", best_params, "Validation Accuracy:", best_val_acc)
+
+### combined Train and Val (model RandF)
+final_rf = RandomForestClassifier(
+    **best_params,
+    class_weight='balanced',
+    random_state=42,
+    n_jobs=-1
+)
+final_rf.fit(x_train_val, y_train_val)
+
+### Results
+y_test_pred = final_rf.predict(x_test)
+print(f"\nTest Accuracy: {accuracy_score(y_test, y_test_pred):.3f}")
+
+print("\nClassification Report:")
+print(classification_report(
+    y_test, y_test_pred,
+    target_names=le.classes_,
+    zero_division=0
+))
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_test_pred))
+
+
+# Learning Curve
+def plot_learning_curve(estimator, x, y, title):
+    train_sizes, train_scores, val_scores = learning_curve(
+        estimator, x, y,
+        cv=5,
+        train_sizes=np.linspace(0.1, 1.0, 5),
+        scoring='accuracy',
+        n_jobs=-1
+    )
+    plt.figure()
+    plt.plot(train_sizes, np.mean(train_scores, axis=1), 'o-', label='Train')
+    plt.plot(train_sizes, np.mean(val_scores, axis=1), 'o-', label='Validation')
+    plt.title(title)
+    plt.xlabel('Training examples')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.show()
+
+## Logistic Regression Learning Curve
+x_lc_lr = scaler_final.transform(x_train_val)
+plot_learning_curve(final_model, x_lc_lr, y_train_val, 'Learning Curve - Logistic Regression')
+
+## Random Forest Learning Curve
+plot_learning_curve(final_rf, x_train_val, y_train_val, 'Learning Curve - Random Forest')
+
+# ROC Curves & AUC
+plt.figure()
+for name, model, x_test_mod in [
+    ('LR', final_model, x_test_scaled_final),
+    ('RF', final_rf,   x_test)
+]:
+    y_proba = model.predict_proba(x_test_mod)
+    for i, cls in enumerate(le.classes_):
+        fpr, tpr, _ = roc_curve((y_test == i).astype(int), y_proba[:, i])
+        roc_auc = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f'{name}-{cls} (AUC={roc_auc:.2f})')
+
+plt.plot([0,1], [0,1], 'k--')
+plt.title('ROC Curves')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.legend()
+plt.show()
+
+# Precision and Recall
+for name, model, x_test_mod in [
+    ('LR', final_model, x_test_scaled_final),
+    ('RF', final_rf,   x_test)
+]:
+    y_pred = model.predict(x_test_mod)
+    print(f"{name} Precision (macro):", precision_score(y_test, y_pred, average='macro'))
+    print(f"{name} Recall    (macro):", recall_score(y_test, y_pred, average='macro'))
+
+# Venn Diag Error
+lr_errors = set(np.where(final_model.predict(x_test_scaled_final) != y_test)[0])
+rf_errors = set(np.where(final_rf.predict(x_test) != y_test)[0])
+lr_idx = set(x_test.index[list(lr_errors)])
+rf_idx = set(x_test.index[list(rf_errors)])
+
+venn2([lr_idx, rf_idx], set_labels=('LR Errors','RF Errors'))
+plt.title('Error Venn Diag')
+plt.show()
